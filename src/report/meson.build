@@ -64,4 +64,15 @@ executables += [
                         'report-sign-tsm.c',
                 ),
         },
+        libexec_template + {
+                'name' : 'systemd-report-tsa',
+                'export' : files(
+                        'report-tsa.c',
+                        'report-tsa-server.c',
+                ),
+                'dependencies' : [
+                        libopenssl,
+                        libcurl,
+                ],
+        },
 ]
