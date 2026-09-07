@@ -1,0 +1,18 @@
+[Unit]
+Description=Report System Tsa Metrics Socket
+DefaultDependencies=no
+Before=sockets.target
+
+[Socket]
+ListenStream=/run/systemd/report/io.systemd.Tsa
+FileDescriptorName=varlink
+SocketMode=0666
+Accept=yes
+MaxConnectionsPerSource=16
+RemoveOnStop=yes
+XAttrEntryPoint=user.varlink=entrypoint
+XAttrListen=user.varlink=listen
+XAttrAccept=user.varlink=server
+
+[Install]
+WantedBy=sockets.target
