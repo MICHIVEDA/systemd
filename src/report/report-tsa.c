@@ -32,11 +32,11 @@ static inline void X509_ALGOR_freep(X509_ALGOR **p) {
                 X509_ALGOR_free(*p);
 }
 
-static int hash_create(uint8_t *nonce, uint8_t *hash_val, unsigned int *hash_len) {
+static int hash_create(uint8_t *nonce, size_t nonce_len, uint8_t *hash_val, unsigned int *hash_len) {
         _cleanup_(EVP_MD_CTX_freep) EVP_MD_CTX *mdctx = NULL;
 
         int r;
-        r = RAND_bytes(nonce, sizeof(nonce));
+        r = RAND_bytes(nonce, nonce_len);
         if (r <= 0)
                 return log_error_errno(r, "Failed to generate secure random nonce.");
 
@@ -48,7 +48,7 @@ static int hash_create(uint8_t *nonce, uint8_t *hash_val, unsigned int *hash_len
         if (r <= 0)
                 return log_error_errno(r, "Message digest initialization failed.");
 
-        r = EVP_DigestUpdate(mdctx, nonce, sizeof(nonce));
+        r = EVP_DigestUpdate(mdctx, nonce, nonce_len);
         if (r <= 0)
                 return log_error_errno(r, "Message digest update failed.");
 
@@ -112,7 +112,7 @@ static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata
         uint8_t hash_val[EVP_MAX_MD_SIZE];
         unsigned int hash_len = 0;
 
-        r = hash_create(nonce, hash_val, &hash_len);
+        r = hash_create(nonce, sizeof(nonce), hash_val, &hash_len);
         if (r < 0)
                 return log_error_errno(r, "Failed hash generation");
 
