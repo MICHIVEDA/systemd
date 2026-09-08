@@ -103,6 +103,22 @@ static int request_create(const uint8_t *hash_val, const unsigned int hash_len, 
         return 0;
 }
 
+static int request_serialize(const TS_REQ *ts_req, unsigned char **ret_der, int *ret_der_len) {
+        unsigned char *der = NULL;
+        int len;
+        if (!ts_req || !ret_der || !ret_der_len)
+                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid arguments to request_serialize.");
+
+        len = i2d_TS_REQ(ts_req, &der);
+        if (len <= 0)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
+        *ret_der = der;
+        *ret_der_len = len;
+
+        return 0;
+
+}
+
 static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata) {
         int r;
         assert(mf && mf->name);
@@ -121,21 +137,23 @@ static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata
         if (r < 0)
                 return log_error_errno(r, "Failed to create request.");
 
-        char hex_str[EVP_MAX_MD_SIZE * 2 + 1];
-        for (unsigned int i = 0; i < hash_len; i++) {
-                sprintf(&hex_str[i * 2], "%02x", hash_val[i]);
-        }
+        unsigned char *der = NULL;
+        int der_len = 0;
+        r = request_serialize(ts_req, &der, &der_len);
+        if (r < 0)
+                return r; // Serialize function already logs error.
+        char output_str[64];
+        snprintf(output_str, sizeof(output_str), "DER length is %d bytes", der_len);
 
-        hex_str[hash_len * 2] = '\0'; /* Ensure it is null-terminated */
-
-        // log_info("Successfully generated TSA hash: %s", hex_str);
-
-        return metric_build_send_string(
+        int ret = metric_build_send_string(
                         mf,
                         link,
                         /* object= */ NULL,
-                        hex_str,
+                        output_str,
                         /* fields= */ NULL);
+        OPENSSL_free(der);
+
+        return ret;
 }
 
 static const MetricFamily metric_family_table[] = {
