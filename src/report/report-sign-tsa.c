@@ -1,3 +1,4 @@
+#include <curl/curl.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/ts.h>
@@ -5,19 +6,29 @@
 
 #include "sd-json.h"
 #include "sd-varlink.h"
-
+#include "assert-util.h"
 #include "alloc-util.h"
+#include "assert-util.h"
 #include "build.h"
+#include "curl-util.h"
 #include "iovec-util.h"
 #include "json-util.h"
 #include "log.h"
 #include "macro.h"
 #include "main-func.h"
 #include "varlink-util.h"
+#include "varlink-io.systemd.Report.Signer.h"
 #include "verbs.h"
 
-COMMAND("systemd-report-sign-tsa\0", "Sign a report with a timestamp from the TSA server.",
-        // Man page?
+#define TSA_ENDPOINT_URL "https://freetsa.org/tsr"
+/*Sanity cap, real TSA responses are only a few KB, if too big then refuse to buffer it because the behavior isn't normal.*/
+#define TSA_RESPONSE_MAX_SIZE (64U * 1024U)
+
+
+COMMAND(
+    "systemd-report-sign-tsa\0",
+    "Sign a report with a timestamp from the TSA server.",
+    // Man page?
 );
 
 typedef struct SignParameters {
@@ -133,6 +144,155 @@ static int build_timestamp_request(const struct iovec *digest, const char *algor
         *ret_ts_req = TAKE_PTR(ts_req);
         return 0;
 }
+#if HAVE_LIBCURL
+// Collects the response into a struct iovec, reallocationg as needed.
+static size_t tsa_write_callback(char *buf,
+                                 size_t size,
+                                 size_t nmemb,
+                                 void *userp) {
+
+        struct iovec *response = ASSERT_PTR(userdata);
+        int r;
+
+        assert(size == 1);  /* The docs say that this is always true. */
+
+        log_debug("Got an answer from the TSA server (%zu bytes)", nmemb);
+
+        if (nmemb != 0) {
+                size_t new_size = size_add(response->iov_len, nmemb);
+
+                if (new_size > TSA_RESPONSE_MAX_SIZE) {
+                        log_warning("TSA answer too long (%zu > %u), refusing.", new_size, TSA_RESPONSE_MAX_SIZE);
+                        return 0;
+                }
+
+                r = iovec_append(response, &IOVEC_MAKE(buf, nmemb));
+                if (r < 0) {
+                        log_warning("Failed to store TSA answer (%zu bytes): out of memory", nmemb);
+                        return 0;  /* Returning < nmemb signals failure */
+                }
+        }
+
+        return nmemb;
+}
+#endif
+
+static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
+#if HAVE_LIBCURL
+        _cleanup_(curl_slist_free_allp) struct curl_slist *headers = NULL;
+        char error[CURL_ERROR_SIZE] = {};
+        int r;
+
+        assert(ts_req);
+        assert(ret_ts_resp);
+
+        r = dlopen_curl(LOG_DEBUG);
+        if (r < 0)
+                return r;
+
+        _cleanup_(OPENSSL_freep) unsigned char *req_der = NULL;
+        int req_len = i2d_TS_REQ(ts_req, &req_der); //Converts TS_REQ structure into der (binary).
+        if (req_len < 0)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
+
+        r = curl_append_to_header(&header,
+                                  STRV_MAKE("Content-Type: application/timestamp-query",
+                                            "Accept: application/timestamp-reply"));
+        if (r < 0)
+                return log_error_errno(r, "Failed to create curl header: %m");
+
+        _cleanup_(curl_easy_cleanupp) CURL *curl = sym_curl_easy_init(); // Creates easy handle for single network transfer.
+        if (!curl)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOSR), "Failed to initialize CURL.");
+
+        /* If configured, set a timeout for the curl operation. */
+        if (arg_network_timeout_usec != USEC_INFINITY) {
+                if (!easy_setopt(curl, CURLOPT_TIMEOUT, (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC), LOG_ERR, "Failed to set CURLOPT_TIMEOUT: %m"))
+                        return -EXFULL;
+        }
+
+        /* Tell it to POST to the URL */
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_POST, 1L))
+                return -EXFULL;
+
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_ERRORBUFFER, error))
+                return -EXFULL;
+
+        /* Where to write to */
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_WRITEFUNCTION, tsa_write_callback))
+                return -EXFULL;
+
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_WRITEDATA, &response))
+                return -EXFULL;
+
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_HTTPHEADER, header))
+                return -EXFULL;
+
+        if (DEBUG_LOGGING)
+                /* enable verbose for easier tracing */
+                (void) easy_setopt(curl, LOG_WARNING, CURLOPT_VERBOSE, 1L);
+
+        (void) easy_setopt(curl, LOG_WARNING,
+                           CURLOPT_USERAGENT, "systemd-report " GIT_VERSION);
+
+        /*Query this TSA endpoint*/
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_URL, TSA_ENDPOINT_URL))
+                return -EXFULL;
+
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_POSTFIELDSIZE, (long) req_len))
+                return -EXFULL;
+
+        if (!easy_setopt(curl, LOG_ERR, CURLOPT_POSTFIELDS, req_der))
+                return -EXFULL;
+
+        CURLcode code = sym_curl_easy_perform(curl);
+        if (code != CURLE_OK)
+                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                       "Query to %s failed: %s", TSA_ENDPOINT_URL,
+                                       empty_to_null(&error[0]) ?: sym_curl_easy_strerror(code));
+
+        long http_status;
+        code = sym_curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+        if (code != CURLE_OK)
+                return log_error_errno(SYNTHETIC_ERRNO(EUCLEAN),
+                                        "Failed to retrieve response code: %s",
+                                        sym_curl_easy_strerror(code));
+
+        if (http_status != 200)
+                return log_error_errno(SYNTHETIC_ERRNO(EIO),
+                                       "Query to %s failed with code %ld.",
+                                       TSA_ENDPOINT_URL, &http_status);
+
+        if (response.iov_len == 0)
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Query to %s returned an empty response.", TSA_ENDPOINT_URL);
+
+        const unsigned char *p = response.iov_base; // Pointer to the start of the response data.
+        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(NULL, &p, response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
+        if (!ts_resp)
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                       "Failed to parse TSA response into TS_RESP structure.");
+
+        TS_STATUS_INFO *status_info = TS_RESP_get0_status_info(ts_resp);
+        if (!status_info)
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TSA response has no status info.");
+
+        long status = ASN1_INTEGER_GET(TS_STATUS_get0_status(status_info));
+        if (!IN_SET(status, TS_STATUS_GRANTED, TS_STATUS_GRANTED_WITH_MODS))
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                        "TSA rejected the request (status %ld).", status);
+
+        if (!TS_RESP_get_token(ts_resp))
+                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
+                                        "TSA granted the request but returned no token.");
+
+        *ret_ts_resp = TAKE_PTR(ts_resp);
+        return 0;
+#else
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                   "Compiled without libcurl.");
+#endif
+}
 
 static int vl_method_sign(
                 sd_varlink *link, sd_json_variant *parameters, sd_varlink_method_flags_t flags, void *userdata) {
@@ -191,7 +351,7 @@ static int vl_server(void) {
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate Varlink server: %m");
 
-        r = sd_varlink_server_add_interface(vs, &vl_interface_io_systemd_Metrics);
+        r = sd_varlink_server_add_interface(vs, &vl_interface_io_systemd_Report_Signer);
         if (r < 0)
                 return log_error_errno(r, "Failed to add Varlink interface: %m");
 
