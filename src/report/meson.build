@@ -64,4 +64,18 @@ executables += [
                         'report-sign-tsm.c',
                 ),
         },
+        libexec_template + {
+                'name' : 'systemd-report-sign-tsa',
+                'export' : files(
+                        'report-sign-tsa.c'
+                ),
+                'dependencies' :
+                [
+                        libopenssl_cflags,
+                        libcurl_cflags,
+                ],
+                'conditions' : [
+                        'HAVE_OPENSSL'
+                ],
+        },
 ]

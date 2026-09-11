@@ -1,13 +1,12 @@
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/ts.h>
-#include <openssl/x509.h>
-
 #include "sd-json.h"
 #include "sd-varlink.h"
+
 #include "alloc-util.h"
 #include "assert-util.h"
 #include "build.h"
+#include "cleanup-util.h"
+#include "crypto-util.h"
+#include "dlopen-note.h"
 #include "iovec-util.h"
 #include "json-util.h"
 #include "log.h"
@@ -26,10 +25,8 @@
 #define TSA_RESPONSE_MAX_SIZE (64U * 1024U)
 
 
-COMMAND(
-    "systemd-report-sign-tsa\0",
-    "Sign a report with a timestamp from the TSA server.",
-    // Man page?
+COMMAND("systemd-report-sign-tsa\0", "Sign a report with a timestamp from the TSA server.",
+        // Man page?
 );
 
 typedef struct SignParameters {
@@ -41,47 +38,25 @@ static void sign_parameters_done(SignParameters *p) {
         iovec_done(&p->digest);
 }
 
-// Move to header file.
-static inline void TS_REQ_freep(TS_REQ **p) {
-        if (*p)
-                TS_REQ_free(*p);
-}
-
-static inline void TS_MSG_IMPRINT_freep(TS_MSG_IMPRINT **p) {
-        if (*p)
-                TS_MSG_IMPRINT_free(*p);
-}
-
-static inline void X509_ALGOR_freep(X509_ALGOR **p) {
-        if (*p)
-                X509_ALGOR_free(*p);
-}
-
-static inline void ASN1_INTEGER_freep(ASN1_INTEGER **p) {
-        if (*p)
-                ASN1_INTEGER_free(*p);
-}
-
-static inline void TS_RESP_freep(TS_RESP **p) {
-        if (*p)
-                TS_RESP_free(*p);
-}
-
 static int build_nonce(ASN1_INTEGER **ret_nonce) {
         assert(ret_nonce);
+
+        r = dlopen_libcrypto(LOG_DEBUG);
+        if (r < 0)
+                return r;
 
         _cleanup_(ASN1_INTEGER_freep) ASN1_INTEGER *nonce = NULL;
 
         uint64_t nonce_val;
 
-        if (RAND_bytes((unsigned char *) &nonce_val, sizeof(nonce_val)) != 1)
+        if (sym_RAND_bytes((unsigned char *) &nonce_val, sizeof(nonce_val)) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to generate random nonce.");
 
-        nonce = ASN1_INTEGER_new();
+        nonce = sym_ASN1_INTEGER_new();
         if (!nonce)
                 return log_oom();
 
-        if (ASN1_INTEGER_set_uint64(nonce, nonce_val) != 1)
+        if (sym_ASN1_INTEGER_set_uint64(nonce, nonce_val) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set nonce in ASN1_INTEGER.");
 
         *ret_nonce = TAKE_PTR(nonce);
@@ -100,66 +75,67 @@ static int build_timestamp_request(const struct iovec *digest, const char *algor
         _cleanup_(X509_ALGOR_freep) X509_ALGOR *algo = NULL;
         _cleanup_(ASN1_INTEGER_freep) ASN1_INTEGER *nonce = NULL;
 
-        int nid = OBJ_txt2nid(algorithm);
+        r = dlopen_libcrypto(LOG_DEBUG);
+        if (r < 0)
+                return r;
+
+        int nid = sym_OBJ_txt2nid(algorithm);
         if (nid == NID_undef)
                 return log_error_errno(
-                                SYNTHETIC_ERRNO(EOPNOTSUPP), "Unsupperted digest algorithm: %s.", algorithm);
+                                SYNTHETIC_ERRNO(EOPNOTSUPP), "Unsupported digest algorithm: %s.", algorithm);
 
         /* Possibly implement a check digest size is equal to the size expected by the algorithm*/
 
-        ts_req = TS_REQ_new();
+        ts_req = sym_TS_REQ_new();
         if (!ts_req)
                 return log_oom();
 
         /* version defaults to 1, RFC3161 only defines 1 */
-        ts_imprint = TS_MSG_IMPRINT_new();
+        ts_imprint = sym_TS_MSG_IMPRINT_new();
         if (!ts_imprint)
                 return log_oom();
 
-        algo = X509_ALGOR_new();
+        algo = sym_X509_ALGOR_new();
         if (!algo)
                 return log_oom();
 
         /* redundant given RFC3161 only has one value (1) */
-        if (TS_REQ_set_version(ts_req, 1) != 1)
+        if (sym_TS_REQ_set_version(ts_req, 1) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set version.");
 
-        if (X509_ALGOR_set0(algo, OBJ_nid2obj(nid), V_ASN1_NULL, /*pval=*/NULL) != 1)
+        if (sym_X509_ALGOR_set0(algo, sym_OBJ_nid2obj(nid), V_ASN1_NULL, /*pval=*/NULL) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set digest algorithm.");
 
-        if (TS_MSG_IMPRINT_set_algo(ts_imprint, algo) != 1)
+        if (sym_TS_MSG_IMPRINT_set_algo(ts_imprint, algo) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set message imprint algorithm.");
 
-        if (TS_MSG_IMPRINT_set_msg(ts_imprint, digest->iov_base, digest->iov_len) != 1)
+        if (sym_TS_MSG_IMPRINT_set_msg(ts_imprint, digest->iov_base, digest->iov_len) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set message imprint digest.");
 
-        if (TS_REQ_set_msg_imprint(ts_req, ts_imprint) != 1)
+        if (sym_TS_REQ_set_msg_imprint(ts_req, ts_imprint) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to attach message imprint.");
 
-        if (TS_REQ_set_cert_req(ts_req, 1) != 1)
+        if (sym_TS_REQ_set_cert_req(ts_req, 1) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set certReq flag.");
 
         r = build_nonce(&nonce);
         if (r < 0)
                 return r;
 
-        if (TS_REQ_set_nonce(ts_req, nonce) != 1)
+        if (sym_TS_REQ_set_nonce(ts_req, nonce) != 1)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO), "Failed to set nonce.");
 
         *ret_ts_req = TAKE_PTR(ts_req);
         return 0;
 }
 #if HAVE_LIBCURL
-#include "curl-util.h"
+#        include "curl-util.h"
 // Collects the response into a struct iovec, reallocationg as needed.
-static size_t tsa_write_callback(char *buf,
-                                 size_t size,
-                                 size_t nmemb,
-                                 void *userp) {
+static size_t tsa_write_callback(char *buf, size_t size, size_t nmemb, void *userp) {
 
         struct iovec *response = ASSERT_PTR(userp);
 
-        assert(size == 1);  /* The docs say that this is always true. */
+        assert(size == 1); /* The docs say that this is always true. */
 
         log_debug("Got an answer from the TSA server (%zu bytes)", nmemb);
 
@@ -167,13 +143,15 @@ static size_t tsa_write_callback(char *buf,
                 size_t new_size = size_add(response->iov_len, nmemb);
 
                 if (new_size > TSA_RESPONSE_MAX_SIZE) {
-                        log_warning("TSA answer too long (%zu > %u), refusing.", new_size, TSA_RESPONSE_MAX_SIZE);
+                        log_warning("TSA answer too long (%zu > %u), refusing.",
+                                    new_size,
+                                    TSA_RESPONSE_MAX_SIZE);
                         return 0;
                 }
 
                 if (!iovec_append(response, &IOVEC_MAKE(buf, nmemb))) {
                         log_warning("Failed to store TSA answer (%zu bytes): out of memory", nmemb);
-                        return 0;  /* Returning < nmemb signals failure */
+                        return 0; /* Returning < nmemb signals failure */
                 }
         }
 
@@ -195,23 +173,27 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 return r;
 
         _cleanup_(OPENSSL_freep) unsigned char *req_der = NULL;
-        int req_len = i2d_TS_REQ(ts_req, &req_der); //Converts TS_REQ structure into der (binary).
+        int req_len = i2d_TS_REQ(ts_req, &req_der); // Converts TS_REQ structure into der (binary).
         if (req_len < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
 
-        r = curl_append_to_header(&header,
-                                  STRV_MAKE("Content-Type: application/timestamp-query",
-                                            "Accept: application/timestamp-reply"));
+        r = curl_append_to_header(
+                        &header,
+                        STRV_MAKE("Content-Type: application/timestamp-query",
+                                  "Accept: application/timestamp-reply"));
         if (r < 0)
                 return log_error_errno(r, "Failed to create curl header: %m");
 
-        _cleanup_(curl_easy_cleanupp) CURL *curl = sym_curl_easy_init(); // Creates easy handle for single network transfer.
+        _cleanup_(curl_easy_cleanupp)
+                        CURL *curl = sym_curl_easy_init(); // Creates easy handle for single network transfer.
         if (!curl)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOSR), "Failed to initialize CURL.");
 
         /* If configured, set a timeout for the curl operation. */
         if (arg_network_timeout_usec != USEC_INFINITY &&
-            !easy_setopt(curl, LOG_ERR, CURLOPT_TIMEOUT,
+            !easy_setopt(curl,
+                         LOG_ERR,
+                         CURLOPT_TIMEOUT,
                          (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC)))
                 return -EXFULL;
 
@@ -237,8 +219,7 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 /* enable verbose for easier tracing */
                 (void) easy_setopt(curl, LOG_WARNING, CURLOPT_VERBOSE, 1L);
 
-        (void) easy_setopt(curl, LOG_WARNING,
-                           CURLOPT_USERAGENT, "systemd-report " GIT_VERSION);
+        (void) easy_setopt(curl, LOG_WARNING, CURLOPT_USERAGENT, "systemd-report " GIT_VERSION);
 
         /*Query this TSA endpoint*/
         if (!easy_setopt(curl, LOG_ERR, CURLOPT_URL, TSA_ENDPOINT_URL))
@@ -252,31 +233,42 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
 
         CURLcode code = sym_curl_easy_perform(curl);
         if (code != CURLE_OK)
-                return log_error_errno(SYNTHETIC_ERRNO(EIO),
-                                       "Query to %s failed: %s", TSA_ENDPOINT_URL,
-                                       empty_to_null(&error[0]) ?: sym_curl_easy_strerror(code));
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EIO),
+                                "Query to %s failed: %s",
+                                TSA_ENDPOINT_URL,
+                                empty_to_null(&error[0]) ?: sym_curl_easy_strerror(code));
 
         long http_status;
         code = sym_curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
         if (code != CURLE_OK)
-                return log_error_errno(SYNTHETIC_ERRNO(EUCLEAN),
-                                        "Failed to retrieve response code: %s",
-                                        sym_curl_easy_strerror(code));
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EUCLEAN),
+                                "Failed to retrieve response code: %s",
+                                sym_curl_easy_strerror(code));
 
         if (http_status != 200)
-                return log_error_errno(SYNTHETIC_ERRNO(EIO),
-                                       "Query to %s failed with code %ld.",
-                                       TSA_ENDPOINT_URL, http_status);
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EIO),
+                                "Query to %s failed with code %ld.",
+                                TSA_ENDPOINT_URL,
+                                http_status);
 
         if (response.iov_len == 0)
-                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
-                                       "Query to %s returned an empty response.", TSA_ENDPOINT_URL);
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EBADMSG),
+                                "Query to %s returned an empty response.",
+                                TSA_ENDPOINT_URL);
 
         const unsigned char *p = response.iov_base; // Pointer to the start of the response data.
-        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(NULL, &p, (long) response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
+        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(
+                        NULL,
+                        &p,
+                        (long) response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
         if (!ts_resp)
-                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
-                                       "Failed to parse TSA response into TS_RESP structure.");
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EBADMSG),
+                                "Failed to parse TSA response into TS_RESP structure.");
 
         TS_STATUS_INFO *status_info = TS_RESP_get_status_info(ts_resp);
         if (!status_info)
@@ -284,18 +276,17 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
 
         long status = ASN1_INTEGER_get(TS_STATUS_INFO_get0_status(status_info));
         if (!IN_SET(status, TS_STATUS_GRANTED, TS_STATUS_GRANTED_WITH_MODS))
-                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
-                                        "TSA rejected the request (status %ld).", status);
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EBADMSG), "TSA rejected the request (status %ld).", status);
 
         if (!TS_RESP_get_token(ts_resp))
-                return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
-                                        "TSA granted the request but returned no token.");
+                return log_error_errno(
+                                SYNTHETIC_ERRNO(EBADMSG), "TSA granted the request but returned no token.");
 
         *ret_ts_resp = TAKE_PTR(ts_resp);
         return 0;
 #else
-        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
-                                   "Compiled without libcurl.");
+        return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP), "Compiled without libcurl.");
 #endif
 }
 
