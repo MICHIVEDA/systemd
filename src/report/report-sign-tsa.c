@@ -1,4 +1,3 @@
-#include <curl/curl.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/ts.h>
@@ -6,18 +5,20 @@
 
 #include "sd-json.h"
 #include "sd-varlink.h"
-#include "assert-util.h"
 #include "alloc-util.h"
 #include "assert-util.h"
 #include "build.h"
-#include "curl-util.h"
 #include "iovec-util.h"
 #include "json-util.h"
 #include "log.h"
 #include "macro.h"
 #include "main-func.h"
-#include "varlink-util.h"
+#include "report.h"
+#include "string-util.h"
+#include "strv.h"
+#include "time-util.h"
 #include "varlink-io.systemd.Report.Signer.h"
+#include "varlink-util.h"
 #include "verbs.h"
 
 #define TSA_ENDPOINT_URL "https://freetsa.org/tsr"
@@ -61,8 +62,12 @@ static inline void ASN1_INTEGER_freep(ASN1_INTEGER **p) {
                 ASN1_INTEGER_free(*p);
 }
 
+static inline void TS_RESP_freep(TS_RESP **p) {
+        if (*p)
+                TS_RESP_free(*p);
+}
+
 static int build_nonce(ASN1_INTEGER **ret_nonce) {
-        int r;
         assert(ret_nonce);
 
         _cleanup_(ASN1_INTEGER_freep) ASN1_INTEGER *nonce = NULL;
@@ -145,14 +150,14 @@ static int build_timestamp_request(const struct iovec *digest, const char *algor
         return 0;
 }
 #if HAVE_LIBCURL
+#include "curl-util.h"
 // Collects the response into a struct iovec, reallocationg as needed.
 static size_t tsa_write_callback(char *buf,
                                  size_t size,
                                  size_t nmemb,
                                  void *userp) {
 
-        struct iovec *response = ASSERT_PTR(userdata);
-        int r;
+        struct iovec *response = ASSERT_PTR(userp);
 
         assert(size == 1);  /* The docs say that this is always true. */
 
@@ -166,8 +171,7 @@ static size_t tsa_write_callback(char *buf,
                         return 0;
                 }
 
-                r = iovec_append(response, &IOVEC_MAKE(buf, nmemb));
-                if (r < 0) {
+                if (!iovec_append(response, &IOVEC_MAKE(buf, nmemb))) {
                         log_warning("Failed to store TSA answer (%zu bytes): out of memory", nmemb);
                         return 0;  /* Returning < nmemb signals failure */
                 }
@@ -179,7 +183,7 @@ static size_t tsa_write_callback(char *buf,
 
 static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
 #if HAVE_LIBCURL
-        _cleanup_(curl_slist_free_allp) struct curl_slist *headers = NULL;
+        _cleanup_(curl_slist_free_allp) struct curl_slist *header = NULL;
         char error[CURL_ERROR_SIZE] = {};
         int r;
 
@@ -206,10 +210,10 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 return log_error_errno(SYNTHETIC_ERRNO(ENOSR), "Failed to initialize CURL.");
 
         /* If configured, set a timeout for the curl operation. */
-        if (arg_network_timeout_usec != USEC_INFINITY) {
-                if (!easy_setopt(curl, CURLOPT_TIMEOUT, (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC), LOG_ERR, "Failed to set CURLOPT_TIMEOUT: %m"))
-                        return -EXFULL;
-        }
+        if (arg_network_timeout_usec != USEC_INFINITY &&
+            !easy_setopt(curl, LOG_ERR, CURLOPT_TIMEOUT,
+                         (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC)))
+                return -EXFULL;
 
         /* Tell it to POST to the URL */
         if (!easy_setopt(curl, LOG_ERR, CURLOPT_POST, 1L))
@@ -219,6 +223,7 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 return -EXFULL;
 
         /* Where to write to */
+        _cleanup_(iovec_done) struct iovec response = {};
         if (!easy_setopt(curl, LOG_ERR, CURLOPT_WRITEFUNCTION, tsa_write_callback))
                 return -EXFULL;
 
@@ -261,23 +266,23 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
         if (http_status != 200)
                 return log_error_errno(SYNTHETIC_ERRNO(EIO),
                                        "Query to %s failed with code %ld.",
-                                       TSA_ENDPOINT_URL, &http_status);
+                                       TSA_ENDPOINT_URL, http_status);
 
         if (response.iov_len == 0)
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                        "Query to %s returned an empty response.", TSA_ENDPOINT_URL);
 
         const unsigned char *p = response.iov_base; // Pointer to the start of the response data.
-        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(NULL, &p, response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
+        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(NULL, &p, (long) response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
         if (!ts_resp)
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                        "Failed to parse TSA response into TS_RESP structure.");
 
-        TS_STATUS_INFO *status_info = TS_RESP_get0_status_info(ts_resp);
+        TS_STATUS_INFO *status_info = TS_RESP_get_status_info(ts_resp);
         if (!status_info)
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TSA response has no status info.");
 
-        long status = ASN1_INTEGER_GET(TS_STATUS_get0_status(status_info));
+        long status = ASN1_INTEGER_get(TS_STATUS_INFO_get0_status(status_info));
         if (!IN_SET(status, TS_STATUS_GRANTED, TS_STATUS_GRANTED_WITH_MODS))
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG),
                                         "TSA rejected the request (status %ld).", status);
