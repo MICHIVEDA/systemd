@@ -54,6 +54,7 @@ int parse_openssl_key_source_argument(
 
 #        include "dlfcn-util.h"
 
+/* additions start */
 extern DLSYM_PROTOTYPE(TS_MSG_IMPRINT_free);
 extern DLSYM_PROTOTYPE(TS_MSG_IMPRINT_new);
 extern DLSYM_PROTOTYPE(TS_MSG_IMPRINT_set_algo);
@@ -64,14 +65,22 @@ extern DLSYM_PROTOTYPE(TS_REQ_set_cert_req);
 extern DLSYM_PROTOTYPE(TS_REQ_set_msg_imprint);
 extern DLSYM_PROTOTYPE(TS_REQ_set_nonce);
 extern DLSYM_PROTOTYPE(TS_REQ_set_version);
+extern DLSYM_PROTOTYPE(TS_RESP_free);
+extern DLSYM_PROTOTYPE(TS_RESP_get_status_info);
+extern DLSYM_PROTOTYPE(TS_RESP_get_token);
+extern DLSYM_PROTOTYPE(TS_STATUS_INFO_get0_status);
 
-extern DLSYM_PROTOTYPE(ASN1_INTEGER_free); /* after ASN1_INTEGER_dup */
+extern DLSYM_PROTOTYPE(ASN1_INTEGER_free);
 extern DLSYM_PROTOTYPE(ASN1_INTEGER_new);
 extern DLSYM_PROTOTYPE(ASN1_INTEGER_set_uint64);
-extern DLSYM_PROTOTYPE(OBJ_txt2nid);    /* before OBJ_txt2obj */
-extern DLSYM_PROTOTYPE(RAND_bytes);     /* after PKCS7_verify */
-extern DLSYM_PROTOTYPE(X509_ALGOR_new); /* after X509_ALGOR_free */
+extern DLSYM_PROTOTYPE(OBJ_txt2nid);
+extern DLSYM_PROTOTYPE(RAND_bytes);
+extern DLSYM_PROTOTYPE(X509_ALGOR_new);
 extern DLSYM_PROTOTYPE(X509_ALGOR_set0);
+extern DLSYM_PROTOTYPE(ASN1_INTEGER_get);
+extern DLSYM_PROTOTYPE(d2i_TS_RESP);
+extern DLSYM_PROTOTYPE(i2d_TS_REQ);
+/* additions end*/
 
 extern DLSYM_PROTOTYPE(ASN1_ANY_it);
 extern DLSYM_PROTOTYPE(ASN1_BIT_STRING_it);
@@ -308,11 +317,13 @@ extern DLSYM_PROTOTYPE(i2d_X509_NAME);
 #        define sym_OPENSSL_free(addr) sym_CRYPTO_free((addr), OPENSSL_FILE, OPENSSL_LINE)
 #        define sym_PKCS7_set_detached(p, v) sym_PKCS7_ctrl((p), PKCS7_OP_SET_DETACHED_SIGNATURE, (v), NULL)
 
-
+/* addition start*/
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(TS_REQ *, sym_TS_REQ_free, TS_REQ_freep, NULL);
+DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(TS_RESP *, sym_TS_RESP_free, TS_RESP_freep, NULL);
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(TS_MSG_IMPRINT *, sym_TS_MSG_IMPRINT_free, TS_MSG_IMPRINT_freep, NULL);
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(X509_ALGOR *, sym_X509_ALGOR_free, X509_ALGOR_freep, NULL);
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(ASN1_INTEGER *, sym_ASN1_INTEGER_free, ASN1_INTEGER_freep, NULL);
+/*addition end*/
 
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_MACRO_RENAME(void *, sym_OPENSSL_free, OPENSSL_freep, NULL);
 DEFINE_TRIVIAL_CLEANUP_FUNC_FULL_RENAME(

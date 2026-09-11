@@ -39,6 +39,7 @@ static void sign_parameters_done(SignParameters *p) {
 }
 
 static int build_nonce(ASN1_INTEGER **ret_nonce) {
+        int r;
         assert(ret_nonce);
 
         r = dlopen_libcrypto(LOG_DEBUG);
@@ -173,7 +174,7 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 return r;
 
         _cleanup_(OPENSSL_freep) unsigned char *req_der = NULL;
-        int req_len = i2d_TS_REQ(ts_req, &req_der); // Converts TS_REQ structure into der (binary).
+        int req_len = sym_i2d_TS_REQ(ts_req, &req_der); // Converts TS_REQ structure into der (binary).
         if (req_len < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
 
@@ -261,7 +262,7 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                                 TSA_ENDPOINT_URL);
 
         const unsigned char *p = response.iov_base; // Pointer to the start of the response data.
-        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = d2i_TS_RESP(
+        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = sym_d2i_TS_RESP(
                         NULL,
                         &p,
                         (long) response.iov_len); // Decode the DER-encoded TS_RESP structure from the TSA response.
@@ -270,16 +271,16 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                                 SYNTHETIC_ERRNO(EBADMSG),
                                 "Failed to parse TSA response into TS_RESP structure.");
 
-        TS_STATUS_INFO *status_info = TS_RESP_get_status_info(ts_resp);
+        TS_STATUS_INFO *status_info = sym_TS_RESP_get_status_info(ts_resp);
         if (!status_info)
                 return log_error_errno(SYNTHETIC_ERRNO(EBADMSG), "TSA response has no status info.");
 
-        long status = ASN1_INTEGER_get(TS_STATUS_INFO_get0_status(status_info));
+        long status = sym_ASN1_INTEGER_get(sym_TS_STATUS_INFO_get0_status(status_info));
         if (!IN_SET(status, TS_STATUS_GRANTED, TS_STATUS_GRANTED_WITH_MODS))
                 return log_error_errno(
                                 SYNTHETIC_ERRNO(EBADMSG), "TSA rejected the request (status %ld).", status);
 
-        if (!TS_RESP_get_token(ts_resp))
+        if (!sym_TS_RESP_get_token(ts_resp))
                 return log_error_errno(
                                 SYNTHETIC_ERRNO(EBADMSG), "TSA granted the request but returned no token.");
 

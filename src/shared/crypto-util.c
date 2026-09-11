@@ -37,6 +37,7 @@ struct OpenSSLAskPasswordUI {
         UI_METHOD *method;
 };
 
+/* addition start*/
 DLSYM_PROTOTYPE(ASN1_INTEGER_new) = NULL;
 DLSYM_PROTOTYPE(ASN1_INTEGER_set_uint64) = NULL;
 DLSYM_PROTOTYPE(OBJ_txt2nid) = NULL;
@@ -51,7 +52,15 @@ DLSYM_PROTOTYPE(TS_REQ_set_cert_req) = NULL;
 DLSYM_PROTOTYPE(TS_REQ_set_msg_imprint) = NULL;
 DLSYM_PROTOTYPE(TS_REQ_set_nonce) = NULL;
 DLSYM_PROTOTYPE(TS_REQ_set_version) = NULL;
+DLSYM_PROTOTYPE(TS_RESP_free) = NULL;
+DLSYM_PROTOTYPE(TS_RESP_get_status_info) = NULL;
+DLSYM_PROTOTYPE(TS_RESP_get_token) = NULL;
+DLSYM_PROTOTYPE(TS_STATUS_INFO_get0_status) = NULL;
 DLSYM_PROTOTYPE(X509_ALGOR_new) = NULL;
+DLSYM_PROTOTYPE(ASN1_INTEGER_get) = NULL;
+DLSYM_PROTOTYPE(d2i_TS_RESP) = NULL;
+DLSYM_PROTOTYPE(i2d_TS_REQ) = NULL;
+/*addition end */
 
 DLSYM_PROTOTYPE(ASN1_ANY_it) = NULL;
 DLSYM_PROTOTYPE(ASN1_BIT_STRING_it) = NULL;
@@ -380,6 +389,7 @@ int dlopen_libcrypto(int log_level) {
                                 &libcrypto_dl,
                                 soname,
                                 LOG_DEBUG,
+                                /*addition start*/
                                 DLSYM_ARG(TS_REQ_new),
                                 DLSYM_ARG(TS_MSG_IMPRINT_new),
                                 DLSYM_ARG(TS_REQ_set_version),
@@ -404,6 +414,14 @@ int dlopen_libcrypto(int log_level) {
                                 DLSYM_ARG(TS_REQ_set_nonce),
                                 DLSYM_ARG(TS_REQ_set_version),
                                 DLSYM_ARG(X509_ALGOR_new),
+                                DLSYM_ARG(TS_RESP_free),
+                                DLSYM_ARG(TS_RESP_get_status_info),
+                                DLSYM_ARG(TS_RESP_get_token),
+                                DLSYM_ARG(TS_STATUS_INFO_get0_status),
+                                DLSYM_ARG(ASN1_INTEGER_get),
+                                DLSYM_ARG(d2i_TS_RESP),
+                                DLSYM_ARG(i2d_TS_REQ),
+                                /*addition end*/
 
                                 DLSYM_ARG(ASN1_ANY_it),
                                 DLSYM_ARG(ASN1_BIT_STRING_it),
