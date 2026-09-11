@@ -19,6 +19,7 @@
 #include "varlink-io.systemd.Report.Signer.h"
 #include "varlink-util.h"
 #include "verbs.h"
+#include "version.h"
 
 #define TSA_ENDPOINT_URL "https://freetsa.org/tsr"
 /*Sanity cap, real TSA responses are only a few KB, if too big then refuse to buffer it because the behavior isn't normal.*/
@@ -173,8 +174,8 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
         if (r < 0)
                 return r;
 
-        _cleanup_(OPENSSL_freep) unsigned char *req_der = NULL;
-        int req_len = sym_i2d_TS_REQ(ts_req, &req_der); // Converts TS_REQ structure into der (binary).
+        _cleanup_(OPENSSL_freep) void *req_der = NULL;
+                int req_len = sym_i2d_TS_REQ(ts_req, (unsigned char **) &req_der); // Converts TS_REQ structure into der (binary).
         if (req_len < 0)
                 return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
 
@@ -191,12 +192,12 @@ static int query_tsa(const TS_REQ *ts_req, TS_RESP **ret_ts_resp) {
                 return log_error_errno(SYNTHETIC_ERRNO(ENOSR), "Failed to initialize CURL.");
 
         /* If configured, set a timeout for the curl operation. */
-        if (arg_network_timeout_usec != USEC_INFINITY &&
-            !easy_setopt(curl,
-                         LOG_ERR,
-                         CURLOPT_TIMEOUT,
-                         (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC)))
-                return -EXFULL;
+        // if (arg_network_timeout_usec != USEC_INFINITY &&
+        //     !easy_setopt(curl,
+        //                  LOG_ERR,
+        //                  CURLOPT_TIMEOUT,
+        //                  (long) DIV_ROUND_UP(arg_network_timeout_usec, USEC_PER_SEC)))
+        //         return -EXFULL;
 
         /* Tell it to POST to the URL */
         if (!easy_setopt(curl, LOG_ERR, CURLOPT_POST, 1L))
@@ -308,6 +309,7 @@ static int vl_method_sign(
 
         _cleanup_(sign_parameters_done) SignParameters sp = {};
         _cleanup_(TS_REQ_freep) TS_REQ *ts_req = NULL;
+        _cleanup_(TS_RESP_freep) TS_RESP *ts_resp = NULL;
 
         int r;
         assert(link);
@@ -329,6 +331,14 @@ static int vl_method_sign(
         r = build_timestamp_request(&sp.digest, sp.algorithm, &ts_req);
         if (r < 0)
                 return r;
+        r = query_tsa(ts_req, &ts_resp);
+        if (r < 0)
+                return r;
+
+        _cleanup_(OPENSSL_freep) void *token_der = NULL;
+        int token_len = sym_i2d_PKCS7(sym_TS_RESP_get_token(ts_resp), (unsigned char **) &token_der);
+        if (token_len < 0)
+                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_TST_INFO structure into DER format.");
 
         // TSA Config (call )
         return sd_varlink_replybo(
@@ -336,8 +346,8 @@ static int vl_method_sign(
                         SD_JSON_BUILD_PAIR(
                                         "data",
                                         SD_JSON_BUILD_ARRAY(SD_JSON_BUILD_OBJECT(
-                                                        SD_JSON_BUILD_PAIR_STRING("timestampToken", "dummy"),
-                                                        SD_JSON_BUILD_PAIR_STRING("tsaUrl", "dummy")))));
+                                                        SD_JSON_BUILD_PAIR_BASE64("timestampToken", token_der, (size_t) token_len),
+                                                        SD_JSON_BUILD_PAIR_STRING("tsaUrl", TSA_ENDPOINT_URL)))));
 }
 
 static int vl_server(void) {

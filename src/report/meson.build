@@ -75,6 +75,7 @@ executables += [
                         libcurl_cflags,
                 ],
                 'conditions' : [
+                        'HAVE_LIBCURL',
                         'HAVE_OPENSSL'
                 ],
         },
