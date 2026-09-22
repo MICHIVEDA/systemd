@@ -64,4 +64,10 @@ executables += [
                         'report-sign-tsm.c',
                 ),
         },
+        libexec_template + {
+                'name' : 'systemd-report-sign-tsa-client',
+                'export' : files(
+                        'report-sign-tsa-client.c',
+                ),
+        },
 ]

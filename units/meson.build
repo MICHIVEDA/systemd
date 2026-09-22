@@ -800,6 +800,8 @@ units = [
           'file' : 'systemd-report-sign-plain.socket',
           'conditions' : ['HAVE_OPENSSL'],
         },
+        { 'file' : 'systemd-report-sign-tsa.socket'},
+        { 'file' : 'systemd-report-sign-tsa@.service.in'},
         {
           'file' : 'systemd-report-sign-plain@.service.in',
           'conditions' : ['HAVE_OPENSSL'],
