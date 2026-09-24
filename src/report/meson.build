@@ -70,9 +70,5 @@ executables += [
                         'report-tsa.c',
                         'report-tsa-server.c',
                 ),
-                'dependencies' : [
-                        libopenssl,
-                        libcurl,
-                ],
         },
 ]

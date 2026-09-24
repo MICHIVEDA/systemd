@@ -1,159 +1,82 @@
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/ts.h>
-#include <openssl/x509.h>
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include "sd-json.h"
 #include "sd-varlink.h"
 
 #include "alloc-util.h"
+#include "hexdecoct.h"
 #include "log.h"
 #include "macro.h"
 #include "metrics.h"
+#include "random-util.h"
 #include "report-tsa.h"
 
-// Move to header file.
-static inline void EVP_MD_CTX_freep(EVP_MD_CTX **p) {
-        if (*p)
-                EVP_MD_CTX_free(*p);
-}
-
-static inline void TS_REQ_freep(TS_REQ **p) {
-        if (*p)
-                TS_REQ_free(*p);
-}
-
-static inline void TS_MSG_IMPRINT_freep(TS_MSG_IMPRINT **p) {
-        if (*p)
-                TS_MSG_IMPRINT_free(*p);
-}
-
-static inline void X509_ALGOR_freep(X509_ALGOR **p) {
-        if (*p)
-                X509_ALGOR_free(*p);
-}
-
-static int hash_create(uint8_t *nonce, size_t nonce_len, uint8_t *hash_val, unsigned int *hash_len) {
-        _cleanup_(EVP_MD_CTX_freep) EVP_MD_CTX *mdctx = NULL;
-
-        int r;
-        r = RAND_bytes(nonce, nonce_len);
-        if (r <= 0)
-                return log_error_errno(r, "Failed to generate secure random nonce.");
-
-        mdctx = EVP_MD_CTX_new();
-        if (mdctx == NULL)
-                return log_error_errno(r, "Message digest create failed.");
-
-        r = EVP_DigestInit_ex(mdctx, EVP_sha256(), /* engine= */ NULL);
-        if (r <= 0)
-                return log_error_errno(r, "Message digest initialization failed.");
-
-        r = EVP_DigestUpdate(mdctx, nonce, nonce_len);
-        if (r <= 0)
-                return log_error_errno(r, "Message digest update failed.");
-
-        r = EVP_DigestFinal_ex(mdctx, hash_val, hash_len);
-        if (r <= 0)
-                return log_error_errno(r, "Message digest finalization failed.");
-
-        return 0;
-}
-
-static int request_create(const uint8_t *hash_val, const unsigned int hash_len, TS_REQ **ret_ts_req) {
-        _cleanup_(TS_REQ_freep) TS_REQ *ts_req = NULL;
-        _cleanup_(TS_MSG_IMPRINT_freep) TS_MSG_IMPRINT *ts_imprint = NULL;
-        _cleanup_(X509_ALGOR_freep) X509_ALGOR *algo = NULL;
+/* This is the exact sme function as 'query-tsa in the client signing implmentation.
+If both implementations are kept they should share
+it instead of redundant code. */
+static int timestamp_query(const char *digest, const char *algorithm, char **ret_token) {
+        _cleanup_(sd_varlink_unrefp) sd_varlink *vl = NULL;
+        _cleanup_(freep) char *token = NULL;
+        sd_json_variant *reply = NULL;
+        const char *error_id = NULL;
         int r;
 
-        ts_req = TS_REQ_new();
-        if (!ts_req)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to create TS_REQ.");
-        ts_imprint = TS_MSG_IMPRINT_new();
-        if (!ts_imprint)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to create TS_MSG_IMPRINT.");
-        algo = X509_ALGOR_new();
-        if (!algo)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to create X509_ALGOR.");
+        assert(digest);
+        assert(algorithm);
+        assert(ret_token);
 
-        r = TS_REQ_set_version(ts_req, 1);
-        if (r != 1)
-                return log_error_errno(r, "Failed TS_REQ_set_version.");
+        r = sd_varlink_connect_address(&vl, "/run/systemd/io.systemd.Timestamp");
+        if (r < 0)
+                return log_error_errno(r, "Failed to connect to timestampd: %m");
 
-        r = X509_ALGOR_set0(algo, OBJ_nid2obj(NID_sha256), V_ASN1_NULL, /*pval=*/NULL);
-        if (r != 1)
-                return log_error_errno(r, "Failed X509_ALGOR_set0.");
+        r = sd_varlink_callbo(
+                        vl,
+                        "io.systemd.Timestamp.Request",
+                        &reply,
+                        &error_id,
+                        SD_JSON_BUILD_PAIR_STRING("digest", digest),
+                        SD_JSON_BUILD_PAIR_STRING("hashAlgorithm", algorithm));
+        if (r < 0)
+                return log_error_errno(r, "Failed to call timestampd: %m");
+        if (error_id)
+                return log_error_errno(
+                                sd_varlink_error_to_errno(error_id, reply),
+                                "Timestampd returned an error: %s",
+                                error_id);
 
-        r = TS_MSG_IMPRINT_set_algo(ts_imprint, algo);
-        if (r != 1)
-                return log_error_errno(r, "Failed TS_MSG_IMPRINT_set_algo.");
+        static const sd_json_dispatch_field table[] = {
+                { "token", SD_JSON_VARIANT_STRING, sd_json_dispatch_string, 0, SD_JSON_MANDATORY },
+                {}
+        };
 
-        r = TS_MSG_IMPRINT_set_msg(ts_imprint, (unsigned char *) hash_val, hash_len);
-        if (r != 1)
-                return log_error_errno(r, "Failed TS_MSG_IMPRINT_set_msg.");
+        r = sd_json_dispatch(reply, table, SD_JSON_ALLOW_EXTENSIONS, &token);
+        if (r < 0)
+                return log_error_errno(r, "Failed to parse timestampd reply: %m");
 
-        r = TS_REQ_set_msg_imprint(ts_req, ts_imprint);
-        if (r != 1)
-                return log_error_errno(r, "Failed TS_REQ_set_msg_imprint.");
-
-        r = TS_REQ_set_cert_req(ts_req, 1);
-        if (r != 1)
-                return log_error_errno(r, "Failed TS_REQ_set_cert_req.");
-
-        *ret_ts_req = TAKE_PTR(ts_req);
+        *ret_token = TAKE_PTR(token);
         return 0;
-}
-
-static int request_serialize(const TS_REQ *ts_req, unsigned char **ret_der, int *ret_der_len) {
-        unsigned char *der = NULL;
-        int len;
-        if (!ts_req || !ret_der || !ret_der_len)
-                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Invalid arguments to request_serialize.");
-
-        len = i2d_TS_REQ(ts_req, &der);
-        if (len <= 0)
-                return log_error_errno(SYNTHETIC_ERRNO(ENOMEM), "Failed to serialize TS_REQ.");
-        *ret_der = der;
-        *ret_der_len = len;
-
-        return 0;
-
 }
 
 static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata) {
+        _cleanup_(freep) char *token = NULL;
+        _cleanup_(freep) char *hex = NULL;
+        uint8_t buf[32]; /* SHA digest length, only the token's genTime matters, not content. */
         int r;
-        assert(mf && mf->name);
+
+        assert(mf);
         assert(link);
 
-        uint8_t nonce[32];
-        uint8_t hash_val[EVP_MAX_MD_SIZE];
-        unsigned int hash_len = 0;
+        random_bytes(buf, sizeof(buf)); /* Generate a random 32-byte value, maybe a safer way? */
 
-        r = hash_create(nonce, sizeof(nonce), hash_val, &hash_len);
+        hex = hexmem(buf, sizeof(buf));
+        if (!hex)
+                return log_oom();
+
+        r = timestamp_query(hex, "SHA256", &token);
         if (r < 0)
-                return log_error_errno(r, "Failed hash generation");
+                return r;
 
-        _cleanup_(TS_REQ_freep) TS_REQ *ts_req = NULL;
-        r = request_create(hash_val, hash_len, &ts_req);
-        if (r < 0)
-                return log_error_errno(r, "Failed to create request.");
-
-        unsigned char *der = NULL;
-        int der_len = 0;
-        r = request_serialize(ts_req, &der, &der_len);
-        if (r < 0)
-                return r; // Serialize function already logs error.
-        char output_str[64];
-        snprintf(output_str, sizeof(output_str), "DER length is %d bytes", der_len);
-
-        int ret = metric_build_send_string(
-                        mf,
-                        link,
-                        /* object= */ NULL,
-                        output_str,
-                        /* fields= */ NULL);
-        OPENSSL_free(der);
-
-        return ret;
+        return metric_build_send_string(mf, link, /* object= */ NULL, token, /* fields= */ NULL);
 }
 
 static const MetricFamily metric_family_table[] = {
