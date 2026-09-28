@@ -6,17 +6,14 @@
 #include "alloc-util.h"
 #include "hexdecoct.h"
 #include "log.h"
-#include "macro.h"
 #include "metrics.h"
 #include "random-util.h"
 #include "report-tsa.h"
+#include "time-util.h"
 
-/* This is the exact sme function as 'query-tsa in the client signing implmentation.
-If both implementations are kept they should share
-it instead of redundant code. */
 static int timestamp_query(const char *digest, const char *algorithm, char **ret_token) {
         _cleanup_(sd_varlink_unrefp) sd_varlink *vl = NULL;
-        _cleanup_(freep) char *token = NULL;
+        _cleanup_free_ char *token = NULL;
         sd_json_variant *reply = NULL;
         const char *error_id = NULL;
         int r;
@@ -28,6 +25,11 @@ static int timestamp_query(const char *digest, const char *algorithm, char **ret
         r = sd_varlink_connect_address(&vl, "/run/systemd/io.systemd.Timestamp");
         if (r < 0)
                 return log_error_errno(r, "Failed to connect to timestampd: %m");
+
+        /* timestampd waits up to 90s, so ensure to not give up before it does.*/
+        r = sd_varlink_set_relative_timeout(vl, 2 * USEC_PER_MINUTE);
+        if (r < 0)
+                return log_error_errno(r, "Failed to set Varlink timeout: %m");
 
         r = sd_varlink_callbo(
                         vl,
@@ -41,7 +43,7 @@ static int timestamp_query(const char *digest, const char *algorithm, char **ret
         if (error_id)
                 return log_error_errno(
                                 sd_varlink_error_to_errno(error_id, reply),
-                                "Timestampd returned an error: %s",
+                                "timestampd returned an error: %s",
                                 error_id);
 
         static const sd_json_dispatch_field table[] = {
@@ -58,15 +60,14 @@ static int timestamp_query(const char *digest, const char *algorithm, char **ret
 }
 
 static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata) {
-        _cleanup_(freep) char *token = NULL;
-        _cleanup_(freep) char *hex = NULL;
-        uint8_t buf[32]; /* SHA digest length, only the token's genTime matters, not content. */
+        _cleanup_free_ char *hex = NULL, *token = NULL;
+        uint8_t buf[32];
         int r;
 
         assert(mf);
         assert(link);
 
-        random_bytes(buf, sizeof(buf)); /* Generate a random 32-byte value, maybe a safer way? */
+        random_bytes(buf, sizeof(buf));
 
         hex = hexmem(buf, sizeof(buf));
         if (!hex)
@@ -81,10 +82,10 @@ static int tsa_generate(const MetricFamily *mf, sd_varlink *link, void *userdata
 
 static const MetricFamily metric_family_table[] = {
         {
-         METRIC_IO_SYSTEMD_TSA_PREFIX "Timestamp",
-         "Timestamp token from Timestamp Authority", METRIC_FAMILY_TYPE_STRING,
-         .generate = tsa_generate,
-         },
+                METRIC_IO_SYSTEMD_TSA_PREFIX "Timestamp",
+                "Timestamp token from Timestamp Authority", METRIC_FAMILY_TYPE_STRING,
+                .generate = tsa_generate,
+        },
         {}
 };
 

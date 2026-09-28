@@ -70,5 +70,8 @@ executables += [
                         'report-tsa.c',
                         'report-tsa-server.c',
                 ),
+                'conditions' : [
+                        'ENABLE_TIMESTAMPD',
+                ],
         },
 ]

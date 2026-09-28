@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+
 #include "sd-json.h"
 #include "sd-varlink.h"
 
@@ -11,9 +12,8 @@
 #include "verbs.h"
 
 COMMAND(
-    "systemd-report-tsa\0",
-    "Generate timestamp from the TSA server.",
-    // Man page?
+        "systemd-report-tsa\0",
+        "Provide an RFC 3161 timestamp token as a report metric.",
 );
 
 static int vl_server(void) {
